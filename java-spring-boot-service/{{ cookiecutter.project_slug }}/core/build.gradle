@@ -1,7 +1,0 @@
-dependencies {
-    implementation group: 'io.projectreactor', name: 'reactor-core', version: "$javaRxVersion"
-}
-
-test {
-    useJUnitPlatform()
-}

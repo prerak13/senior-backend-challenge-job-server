@@ -1,4 +1,0 @@
-rootProject.name = '{{ cookiecutter.project_slug }}'
-include 'application'
-include 'core'
-include 'infrastructure'
