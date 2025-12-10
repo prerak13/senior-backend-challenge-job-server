@@ -13,6 +13,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.util.Optional;
 import java.util.UUID;
@@ -61,15 +63,22 @@ public class JobService implements JobUseCasePort {
                 .parameters(parameters)
                 .build();
 
-        Job savedJob = jobRepository.save(job);
+        jobRepository.save(job);
         logger.info("Job submitted: {}", jobId);
 
-        // Process job asynchronously using the adapter
-        processJobUseCase.processJobAsync(jobId);
-
         // Re-fetch with eagerly loaded relationships to avoid LazyInitializationException
-        return jobRepository.findByJobId(jobId)
+        Job jobWithRelations = jobRepository.findByJobId(jobId)
                 .orElseThrow(() -> new IllegalStateException("Job not found immediately after save - this should never happen: " + jobId));
+        
+        // Schedule async processing AFTER transaction commits to ensure job is visible
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                processJobUseCase.processJobAsync(jobId);
+            }
+        });
+        
+        return jobWithRelations;
     }
 
     @Override

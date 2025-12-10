@@ -10,6 +10,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.Optional;
@@ -29,8 +30,8 @@ public class AsyncProcessJobAdapter implements ProcessJobUseCasePort {
     }
 
     @Override
-    @Async
-    @Transactional
+    @Async("taskExecutor")
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void processJobAsync(String jobId) {
         logger.info("Starting async processing for job: {}", jobId);
         
