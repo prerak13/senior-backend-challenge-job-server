@@ -103,3 +103,337 @@ Build a job server that allows users to submit asynchronous jobs, processes them
 ## Estimated Completion Time
 ~4–6 hours
 
+---
+
+## Implementation
+
+This project has been implemented as a Java Spring Boot application following hexagonal architecture principles.
+
+### Project Structure
+
+```
+job-server/
+├── src/
+│   ├── main/
+│   │   ├── java/com/jobserver/
+│   │   │   ├── domain/              # Domain layer (core business logic)
+│   │   │   │   ├── model/           # Domain entities (Job, User, Project, JobStatus)
+│   │   │   │   └── port/            # Ports (interfaces)
+│   │   │   │       ├── in/          # Inbound ports (use cases)
+│   │   │   │       │   ├── JobUseCasePort.java
+│   │   │   │       │   └── ProcessJobUseCasePort.java
+│   │   │   │       └── out/         # Outbound ports (repositories, external services)
+│   │   │   │           ├── JobRepositoryPort.java
+│   │   │   │           ├── ProjectRepositoryPort.java
+│   │   │   │           ├── UserRepositoryPort.java
+│   │   │   │           ├── ExternalServiceClientPort.java
+│   │   │   │           └── ExternalServiceResponse.java
+│   │   │   ├── adapter/             # Adapters (implementations)
+│   │   │   │   ├── persistence/     # JPA repositories
+│   │   │   │   │   ├── JpaJobRepository.java
+│   │   │   │   │   ├── JpaProjectRepository.java
+│   │   │   │   │   └── JpaUserRepository.java
+│   │   │   │   ├── external/        # External service client
+│   │   │   │   │   └── WebClientExternalServiceAdapter.java
+│   │   │   │   └── processing/      # Async job processing adapter
+│   │   │   │       └── AsyncProcessJobAdapter.java
+│   │   │   ├── service/             # Application services (use case implementations)
+│   │   │   │   └── JobService.java
+│   │   │   ├── api/                 # REST controllers (inbound adapter)
+│   │   │   │   ├── dto/             # Data transfer objects
+│   │   │   │   │   ├── JobResponse.java
+│   │   │   │   │   └── SubmitJobRequest.java
+│   │   │   │   ├── JobController.java
+│   │   │   │   └── GlobalExceptionHandler.java
+│   │   │   ├── config/              # Configuration
+│   │   │   │   ├── AsyncConfig.java
+│   │   │   │   └── WebClientConfig.java
+│   │   │   └── JobServerApplication.java
+│   │   └── resources/
+│   │       ├── application.yml      # Application configuration
+│   │       └── import.sql           # Sample data
+│   └── test/                        # Unit tests
+│       └── java/com/jobserver/
+│           ├── api/
+│           │   └── JobControllerTest.java
+│           └── service/
+│               └── JobServiceTest.java
+├── Dockerfile
+└── pom.xml
+```
+
+#### Async Processing
+
+**Implementation:**
+- Uses Spring's `@Async` annotation with a custom `ThreadPoolTaskExecutor`
+- Thread pool configuration:
+  - **Core pool size**: 5 threads
+  - **Max pool size**: 10 threads
+  - **Queue capacity**: 100 jobs
+  - **Thread naming**: `job-processor-{n}` for easy identification in logs
+
+**How it works:**
+1. When a job is submitted, it's immediately saved with `PENDING` status
+2. The `submitJob()` method triggers `processJobAsync()` asynchronously
+3. Uses self-injection pattern (`@Lazy ProcessJobUseCase`) to ensure `@Async` proxy works correctly
+4. Each job runs in a separate thread from the pool
+5. Jobs are processed in parallel without blocking API requests
+6. Each job processing is isolated - failures in one job don't affect others
+
+**Benefits:**
+- Non-blocking API responses (immediate return with jobId)
+- Parallel processing of multiple jobs
+- Configurable concurrency (can adjust thread pool size)
+- Graceful degradation (queue prevents overwhelming the system)
+
+**Queue Full Behavior:**
+When the thread pool queue is full (100 jobs queued) and all threads are busy (10 max threads):
+- Spring's `ThreadPoolTaskExecutor` will throw a `RejectedExecutionException`
+- The job is **already saved** in the database with `PENDING` status before the async call
+- The exception propagates to the controller, resulting in a **500 Internal Server Error** response
+- **Important**: The job remains in `PENDING` status and will **never be processed** automatically
+- **Current capacity**: System can handle up to **110 concurrent jobs** (10 active threads + 100 queued)
+- **Recommendation**: Monitor queue usage and consider:
+  - Increasing `queueCapacity` or `maxPoolSize` for higher throughput
+  - Implementing a `RejectedExecutionHandler` (e.g., `CallerRunsPolicy`) to handle overflow
+  - Adding retry logic or a background job to process stuck `PENDING` jobs
+
+#### Error Handling & Failure Strategies
+
+**Retry Strategy:**
+- **Retry count**: 3 attempts (initial + 2 retries)
+- **Backoff strategy**: Exponential backoff starting at 1 second
+- **Max backoff**: 5 seconds 
+- **Retry conditions**:
+  - 5xx server errors (transient server issues)
+  - Timeout exceptions (network delays)
+  - Connection errors (network connectivity issues)
+  - IO exceptions (transient I/O failures)
+- **No retry on**: 4xx client errors (bad requests won't be retried)
+
+**Timeout Protection:**
+- **Request timeout**: 30 seconds per attempt
+- Prevents indefinite blocking on unresponsive external services
+- Total maximum time: ~90 seconds (30s × 3 attempts)
+
+**Error Handling:**
+- Failed jobs are marked with `FAILED` status
+- Error messages are stored in the `errorMessage` field
+- All errors are logged with context (jobId, exception details)
+- Global exception handler provides consistent HTTP error responses
+- Transaction rollback ensures data consistency on failures
+
+**Failure Isolation:**
+- Each job's failure is contained - doesn't affect other jobs
+- Database transactions ensure partial updates don't corrupt data
+- External service failures are caught and stored, not propagated to API layer
+
+## Running the Service
+
+### Prerequisites
+- **Docker Desktop** (must be running)
+- **Java 21** (for local development only)
+- **Maven 3.9+** (for local development only)
+
+### Quick Start with Docker Compose (Recommended)
+
+1. **Ensure Docker Desktop is running**
+
+2. **Start all services:**
+   ```bash
+   docker-compose up --build
+   ```
+   This will:
+   - Build the Spring Boot application
+   - Start MySQL database (port 3306)
+   - Start mock external service (port 8081)
+   - Start job server (port 8080)
+
+3. **Wait for services to be ready** (about 10-15 seconds for initial startup)
+
+4. **Verify services are running:**
+   ```bash
+   docker-compose ps
+   ```
+   All three services should show "Up" status.
+
+5. **Sample data**: Sample users and projects are automatically loaded from `import.sql` on application startup.
+
+6. **Test the API:**
+   ```bash
+   # Submit a job
+   curl -X POST http://localhost:8080/api/jobs \
+     -H "Content-Type: application/json" \
+     -d '{"userId": 1, "projectId": 1, "parameters": "test"}'
+   
+   # Get job status (replace {jobId} with the jobId from above)
+   curl http://localhost:8080/api/jobs/{jobId}
+   ```
+
+7. **Stop services:**
+   ```bash
+   docker-compose down
+   ```
+
+### API Endpoints
+
+#### 1. Submit a Job
+```bash
+POST /api/jobs
+Content-Type: application/json
+
+{
+  "userId": 1,
+  "projectId": 1,  # optional
+  "parameters": "optional job parameters"
+}
+```
+
+**Response:**
+```json
+{
+  "jobId": "550e8400-e29b-41d4-a716-446655440000",
+  "userId": 1,
+  "username": "alice",
+  "projectId": 1,
+  "projectName": "Project Alpha",
+  "status": "PENDING",
+  "parameters": "optional job parameters",
+  "result": null,
+  "errorMessage": null
+}
+```
+
+#### 2. Get Job Status
+```bash
+GET /api/jobs/{jobId}
+```
+
+**Response:**
+```json
+{
+  "jobId": "550e8400-e29b-41d4-a716-446655440000",
+  "userId": 1,
+  "username": "alice",
+  "projectId": 1,
+  "projectName": "Project Alpha",
+  "status": "COMPLETED",
+  "parameters": "optional job parameters",
+  "result": "{\"jobId\":\"...\",\"value\":123,\"status\":\"DONE\"}",
+  "errorMessage": null
+}
+```
+
+### Database Schema Design
+
+**Tables:**
+- `users`: User accounts (id, username, email)
+- `projects`: User projects (id, name, description, user_id)
+- `jobs`: Job records (id, job_id, user_id, project_id, status, parameters, result, error_message)
+
+**Constraints:**
+- Foreign key constraints ensure referential integrity
+- `ON DELETE CASCADE` for users (deleting user deletes their jobs)
+- `ON DELETE SET NULL` for projects (deleting project doesn't delete jobs)
+- Unique constraint on `job_id` (business identifier)
+
+**Indexes:**
+- `idx_job_id`: Fast lookup by jobId (most common query)
+- `idx_user_id`: Fast lookup of user's jobs
+- `idx_status`: Fast filtering by status
+
+**Timestamps:**
+- `created_at`: When job was created (audit trail)
+- `updated_at`: When job was last updated (tracks status changes)
+
+### Async Processing Design
+
+**Why @Async with Thread Pool:**
+- Spring's `@Async` provides simple annotation-based async execution
+- Thread pool gives control over concurrency and resource usage
+- Better than virtual threads for this use case (more predictable, easier to configure)
+
+### Failure Strategy Details
+
+**Retry Logic:**
+- **Why exponential backoff:** Prevents overwhelming a struggling service
+- **Why max backoff:** Prevents excessive wait times (caps at 5 seconds)
+- **Selective retries:** Only retries transient failures (5xx, timeouts, network errors)
+- **No retry on 4xx:** Client errors won't succeed on retry
+
+**Error Storage:**
+- Errors are stored in database (`errorMessage` field)
+- Allows users to query failed jobs and see what went wrong
+- Enables future features like retry mechanisms or error analysis
+
+**Timeout Strategy:**
+- 30 seconds per attempt
+- Prevents indefinite blocking
+- Total max time (30x3=90s)
+
+**Isolation:**
+- Each job's failure is independent
+- Database transactions ensure partial updates don't corrupt data
+- No shared state between job processing threads
+
+### Concurrency Considerations
+
+**Thread Safety:**
+- No shared mutable state in job processing
+- Each job is processed independently
+- Database transactions provide isolation
+
+**Scalability:**
+- Thread pool can be adjusted based on load
+- Queue prevents overwhelming the system
+- Can scale horizontally (multiple instances) if needed (with shared database)
+
+**Resource Management:**
+- Thread pool limits concurrent processing
+- Queue prevents unbounded memory growth
+- Database connections are managed by HikariCP connection pool
+
+### Testing
+
+Unit tests cover:
+- Job submission with valid/invalid users
+- Job submission with/without projects
+- Job retrieval by jobId
+- Error handling scenarios
+
+Test files:
+- `JobServiceTest.java` - Service layer tests
+- `JobControllerTest.java` - API layer tests
+
+### Future Enhancements
+
+Potential improvements:
+- Job retry mechanism with configurable retry policies
+- Job cancellation endpoint
+- Pagination for job listing
+- Metrics and monitoring (Prometheus, Actuator)
+- OpenAPI/Swagger documentation
+- Job priority queues
+- Scheduled jobs
+
+---
+
+## Testing the API with Postman/Curl
+
+### 1. Submit a Job
+- **Request type**: POST
+- **URL:** `http://localhost:8080/api/jobs`
+- **Body:**
+  ```json
+  {
+    "userId": 1,
+    "projectId": 1,
+    "parameters": "test parameters"
+  }
+  ```
+
+### 2. Get Job Status
+- **Request type**: GET
+- **URL:** `http://localhost:8080/api/jobs/{jobId}` (replace `{jobId}` with the value from above)
+- **Send the request.**
+- You should receive a job status JSON response. If the job is still `PROCESSING`, wait and try again until it is `COMPLETED` or `FAILED`.

@@ -18,14 +18,15 @@ services:
     ports:
       - "8081:8081"
 
-  # Candidate service
-  # job-server:
-  #   build: ./job-server
-  #   depends_on:
-  #     - db
-  #     - mock-external
-  #   ports:
-  #     - "8080:8080"
+  job-server:
+    build: ./job-server
+    depends_on:
+      - db
+      - mock-external
+    ports:
+      - "8080:8080"
+    environment:
+      - SPRING_DATASOURCE_URL=jdbc:mysql://db:3306/jobs?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
 
 volumes:
   db_data:
